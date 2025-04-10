@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+
+  cron:
+    build:
+      context: ./cron
+      dockerfile: Dockerfile
+    volumes:
+      - ./cron:/app
+      - ./data:/app/data
+    environment:
+      - PYTHONUNBUFFERED=1
+      - NEWS_API_KEY=${NEWS_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
+
+volumes:
+  data: 
