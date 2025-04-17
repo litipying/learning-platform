@@ -2,6 +2,18 @@ version: '3.8'
 
 services:
 
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    ports:
+      - "8003:8000"
+    volumes:
+      - ./api:/app
+      - ./data:/app/data
+    environment:
+      - PYTHONUNBUFFERED=1
+
   cron:
     build:
       context: ./cron
