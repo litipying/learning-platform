@@ -10,6 +10,7 @@ from elevenlabs import ElevenLabs
 from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
+import random
 
 Base = declarative_base()
 
@@ -31,6 +32,8 @@ class News(Base):
     vocab_explanation3 = Column(Text)
     vocab_sentence3 = Column(Text)
     audio_path = Column(String(500))  # Path to the audio file
+    image_path = Column(String(500))  # Path to the image file
+    video_path = Column(String(500))  # Path to the video file
     created_at = Column(DateTime, default=datetime.utcnow)
 
 def setup_database():
@@ -85,48 +88,55 @@ def generate_alien_news(original_title, original_content):
         api_key=os.getenv('OPENAI_API_KEY'),
         base_url="https://openrouter.ai/api/v1",
         default_headers={
-            "HTTP-Referer": "https://space-english-app.com",
             "X-Title": "Space English Learning App",
             "Content-Type": "application/json"
         }
     )
     
     prompt = f"""
-    You are writing for children aged 6-10 years old who are learning English. 
+    You are writing a 30-SECOND audio script for children aged 6-10 years old who are learning English. 
     Based on this Earth news:
     Title: {original_title}
     Content: {original_content}
     
-    Create a fun, simple, and child-friendly alien version of this news that happened on planet Zorg. 
-    Follow these guidelines:
-    1. Use simple, clear sentences with basic vocabulary
-    2. Keep sentences short (10-15 words maximum)
-    3. Make it fun and playful
-    4. Include some silly alien words (but not too many)
-    5. Avoid any scary, violent, or complex topics
-    6. If the original news is too complex or inappropriate for children, create a simple, fun alien story about a similar but child-friendly topic
+    First, create a unique alien character name that's fun and easy for children to pronounce.
+    Then determine the emotional tone of the story (choose one: happy, excited, surprised, curious, proud, thoughtful).
+    Finally, create an extremely concise, child-friendly alien version that happened on planet Zorg.
+    IMPORTANT: The entire script must be spoken in 30 seconds or less!
     
-    Also select 3 English vocabulary words that are:
-    1. Appropriate for children aged 6-10
-    2. Common words they might encounter in daily life or school
-    3. Words that help build their basic English vocabulary
-    4. Not too easy (like 'the', 'is', 'and') but also not too difficult
+    Follow these strict guidelines:
+    1. Character name: Create a fun, simple alien name (2-3 syllables maximum)
+    2. Emotion: Choose one emotion that best matches the story's tone
+    3. Alien title: Maximum 8 words
+    4. Alien content: Maximum 2 short sentences (about 20-25 words total)
+    5. Use simple words that children know
+    6. Make it fun but keep it brief
+    7. Avoid any scary or complex topics
+    8. If the original news is inappropriate for children, create a very short, fun alien story instead
+    
+    For vocabulary, select 3 simple English words that are:
+    1. From your alien story
+    2. Appropriate for ages 6-10
+    3. Useful for daily life or school
     
     For each vocabulary word:
-    1. Provide a simple, child-friendly explanation
-    2. Write a fun, easy-to-understand example sentence
-    3. The sentence should clearly show the word's meaning
+    1. Give a one-line, super simple explanation (5-7 words maximum)
+    2. NO example sentences needed
     
     Format the response as JSON:
     {{
-        "alien_title": "title (keep it short and fun)",
-        "alien_content": "content (2-3 simple sentences)",
+        "character_name": "fun alien name (2-3 syllables)",
+        "emotion": "one of: happy, excited, surprised, curious, proud, thoughtful",
+        "alien_title": "very short title (max 8 words)",
+        "alien_content": "two short, simple sentences maximum",
         "vocab": [
-            {{"word": "word1", "explanation": "simple explanation1", "sentence": "fun example sentence1"}},
-            {{"word": "word2", "explanation": "simple explanation2", "sentence": "fun example sentence2"}},
-            {{"word": "word3", "explanation": "simple explanation3", "sentence": "fun example sentence3"}}
+            {{"word": "word1", "explanation": "very brief explanation (5-7 words)"}},
+            {{"word": "word2", "explanation": "very brief explanation (5-7 words)"}},
+            {{"word": "word3", "explanation": "very brief explanation (5-7 words)"}}
         ]
     }}
+    
+    Remember: All content MUST fit in a 30-second audio clip!
     """
     
     try:
@@ -155,7 +165,19 @@ def generate_alien_news(original_title, original_content):
         print(f"Full error details: {repr(e)}")
         raise
 
-def generate_audio(text, filename):
+def get_random_voice():
+    """Get a random voice ID and name from the predefined list."""
+    voices = [
+        {"id": "IKne3meq5aSn9XLyUdCD", "name": "Charlie"}, 
+        {"id": "Xb7hH8MSUJpSbSDYk0k2", "name": "Alice"}, 
+        {"id": "iP95p4xoKVk53GoZ742B", "name": "Chris"}, 
+        {"id": "cjVigY5qzO86Huf0OWal", "name": "Eric"}, 
+        {"id": "cgSgspJ2msm6clMCkdW9", "name": "Jessica"},
+        {"id": "pFZP5JQG7iQjIQuC4Bku", "name": "Lily"},
+    ]
+    return random.choice(voices)
+
+def generate_audio(text, today, sequence_num):
     """Generate audio file using ElevenLabs API."""
     try:
         # Initialize ElevenLabs client
@@ -163,19 +185,19 @@ def generate_audio(text, filename):
             api_key=os.getenv('ELEVENLABS_API_KEY')
         )
         
-        # Create audio directory if it doesn't exist
-        os.makedirs('data/audio', exist_ok=True)
+        # Get random voice
+        voice = get_random_voice()
         
-        # Generate audio with a child-friendly voice
+        # Generate audio with a randomly selected child-friendly voice
         audio_generator = client.text_to_speech.convert(
             text=text,
-            voice_id="JBFqnCBsd6RMkjVDRZzb",  # Josh voice ID
+            voice_id=voice["id"],
             model_id="eleven_multilingual_v2",  # Latest multilingual model
             output_format="mp3_44100_128"  # High-quality audio
         )
         
         # Save the audio file
-        file_path = f"data/audio/{filename}.mp3"
+        file_path = f"data/audio/{today}/alien_news_{today}_{sequence_num}.mp3"
         
         # Convert generator to bytes and write to file
         audio_bytes = b''.join(chunk for chunk in audio_generator)
@@ -183,7 +205,7 @@ def generate_audio(text, filename):
             f.write(audio_bytes)
         
         print(f"Successfully generated audio with settings:")
-        print(f"- Voice ID: JBFqnCBsd6RMkjVDRZzb (Josh)")
+        print(f"- Voice: {voice['name']} (ID: {voice['id']})")
         print(f"- Model: eleven_multilingual_v2")
         print(f"- Output format: mp3_44100_128")
         print(f"- File path: {file_path}")
@@ -212,17 +234,14 @@ def generate_audio_content(alien_title, alien_content, vocab_words):
     
     Word number one: <break time="200ms"/>{vocab_words[0]['word']}
     This word means: <break time="200ms"/>{vocab_words[0]['explanation']}
-    Here's how to use it: <break time="200ms"/>{vocab_words[0]['sentence']}
     <break time="500ms"/>
     
     Word number two: <break time="200ms"/>{vocab_words[1]['word']}
     This word means: <break time="200ms"/>{vocab_words[1]['explanation']}
-    Here's how to use it: <break time="200ms"/>{vocab_words[1]['sentence']}
     <break time="500ms"/>
     
     Word number three: <break time="200ms"/>{vocab_words[2]['word']}
     This word means: <break time="200ms"/>{vocab_words[2]['explanation']}
-    Here's how to use it: <break time="200ms"/>{vocab_words[2]['sentence']}
     <break time="800ms"/>
     
     That's all for today's alien news! <break time="300ms"/>Keep learning and having fun!
@@ -230,79 +249,188 @@ def generate_audio_content(alien_title, alien_content, vocab_words):
     """
     return content
 
+def check_folders_exist(today):
+    """
+    Check if all required folders for today's date exist and have content.
+    
+    Args:
+        today (str): Date string in YYYYMMDD format
+        
+    Returns:
+        bool: True if all folders exist and have content, False otherwise
+    """
+    required_folders = {
+        'text': f'data/text/{today}',
+        'audio': f'data/audio/{today}'
+    }
+    
+    try:
+        # Check if all folders exist
+        for folder_path in required_folders.values():
+            if not os.path.exists(folder_path):
+                print(f"Folder {folder_path} does not exist")
+                return False
+            
+            # Check if folder has any files
+            files = os.listdir(folder_path)
+            if not files:
+                print(f"Folder {folder_path} is empty")
+                return False
+            
+            # Check if files match the expected pattern
+            pattern = f"alien_news_{today}_"
+            matching_files = [f for f in files if f.startswith(pattern)]
+            if not matching_files:
+                print(f"No matching files found in {folder_path}")
+                return False
+        
+        print(f"All required folders for {today} exist and have content")
+        return True
+        
+    except Exception as e:
+        print(f"Error checking folders: {str(e)}")
+        return False
+
+def process_article(article, session, sequence_num):
+    """Process a single news article with image, audio, and video generation."""
+    try:
+        # Create date-based folders
+        folders, today = create_date_folders()
+        
+        alien_news = generate_alien_news(article['title'], article['description'])
+        alien_data = clean_json_response(alien_news)
+        
+        print(f"Original Title: {article['title']}")
+        print(f"Original Content: {article['description']}")
+        print(f"Character Name: {alien_data['character_name']}")
+        print(f"Emotion: {alien_data['emotion']}")
+        print(f"Alien Title: {alien_data['alien_title']}")
+        print(f"Alien Content: {alien_data['alien_content']}")
+        
+        # Save text content
+        text_path = save_news_text(alien_data, today, sequence_num)
+        
+        # Use the generated emotion directly
+        emotion = alien_data['emotion']
+        # Generate audio content
+        audio_text = generate_audio_content(
+            alien_data['alien_title'],
+            alien_data['alien_content'],
+            alien_data['vocab']
+        )
+        
+        # Generate and save audio file
+        audio_path = generate_audio(audio_text, today, sequence_num)
+        
+        if not audio_path:
+            print("Failed to generate audio or image")
+            return None
+            
+        # Generate video from audio and image files
+        print(f"audio_path : {audio_path}")
+
+        image_path = None
+        video_path = None
+
+        # Create news entry
+        news = News(
+            original_title=article['title'],
+            original_content=article['description'],
+            alien_title=alien_data['alien_title'],
+            alien_content=alien_data['alien_content'],
+            vocab_word1=alien_data['vocab'][0]['word'],
+            vocab_explanation1=alien_data['vocab'][0]['explanation'],
+            vocab_word2=alien_data['vocab'][1]['word'],
+            vocab_explanation2=alien_data['vocab'][1]['explanation'],
+            vocab_word3=alien_data['vocab'][2]['word'],
+            vocab_explanation3=alien_data['vocab'][2]['explanation'],
+            audio_path=audio_path,
+            image_path=image_path,
+            video_path=video_path
+        )
+        
+        session.add(news)
+        print(f"Generated files for article {sequence_num}:")
+        print(f"- Text: {text_path}")
+        print(f"- Audio: {audio_path}")
+        print(f"- Image: {image_path}")
+        print(f"- Video: {video_path}")
+        print('--------------------------------')
+        
+        return news
+        
+    except Exception as e:
+        print(f"Error processing article: {str(e)}")
+        print(f"Error details: {repr(e)}")
+        return None
+
 def job():
     print(f"Starting news fetch at {datetime.now()}")
+    
+    # Get today's date in YYYYMMDD format
+    today = datetime.now().strftime('%Y%m%d')
+    
+    # Check if today's folders already exist and have content
+    if check_folders_exist(today):
+        print(f"Content for {today} already exists. Skipping job.")
+        return
+    
     engine = setup_database()
     Session = sessionmaker(bind=engine)
     session = Session()
     
     try:
         articles = get_news()
+        print(f"Found {len(articles)} articles to process")
         
-        for article in articles:
-            alien_news = generate_alien_news(article['title'], article['description'])
-            try:
-                alien_data = clean_json_response(alien_news)
-                
-                print(f"Original Title: {article['title']}")
-                print(f"Original Content: {article['description']}")
-                print(f"Alien Title: {alien_data['alien_title']}")
-                print(f"Alien Content: {alien_data['alien_content']}")
-                for i, vocab in enumerate(alien_data['vocab'], 1):
-                    print(f"Vocab {i}:")
-                    print(f"  Word: {vocab['word']}")
-                    print(f"  Explanation: {vocab['explanation']}")
-                    print(f"  Sentence: {vocab['sentence']}")
-                print('--------------------------------')
-                
-                # Generate audio content
-                audio_text = generate_audio_content(
-                    alien_data['alien_title'],
-                    alien_data['alien_content'],
-                    alien_data['vocab']
-                )
-                
-                # Generate unique filename using timestamp
-                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                audio_filename = f"alien_news_{timestamp}"
-                
-                # Generate and save audio file
-                audio_path = generate_audio(audio_text, audio_filename)
-                
-                news = News(
-                    original_title=article['title'],
-                    original_content=article['description'],
-                    alien_title=alien_data['alien_title'],
-                    alien_content=alien_data['alien_content'],
-                    vocab_word1=alien_data['vocab'][0]['word'],
-                    vocab_explanation1=alien_data['vocab'][0]['explanation'],
-                    vocab_sentence1=alien_data['vocab'][0]['sentence'],
-                    vocab_word2=alien_data['vocab'][1]['word'],
-                    vocab_explanation2=alien_data['vocab'][1]['explanation'],
-                    vocab_sentence2=alien_data['vocab'][1]['sentence'],
-                    vocab_word3=alien_data['vocab'][2]['word'],
-                    vocab_explanation3=alien_data['vocab'][2]['explanation'],
-                    vocab_sentence3=alien_data['vocab'][2]['sentence'],
-                    audio_path=audio_path
-                )
-                
-                session.add(news)
-                print(f"Generated audio file: {audio_path}")
-                
-            except Exception as e:
-                print(f"Error processing article: {str(e)}")
-                print(f"Raw response: {alien_news}")
-                continue
+        successful_articles = 0
+        for i, article in enumerate(articles, 1):
+            print(f"\nProcessing article {i} of {len(articles)}")
+            if process_article(article, session, i):
+                successful_articles += 1
         
         session.commit()
-        print(f"Successfully processed {len(articles)} articles")
+        print(f"\nSuccessfully processed {successful_articles} out of {len(articles)} articles")
         
     except Exception as e:
-        print(f"Error occurred: {str(e)}")
+        print(f"Error occurred in job: {str(e)}")
         print(f"Error details: {repr(e)}")
         session.rollback()
     finally:
         session.close()
+
+def create_date_folders():
+    """Create date-based folders for organizing content."""
+    today = datetime.now().strftime('%Y%m%d')
+    
+    folders = {
+        'text': f'data/text/{today}',
+        'audio': f'data/audio/{today}',
+        'images': f'data/images/{today}',
+        'videos': f'data/videos/{today}'
+    }
+    
+    for folder_path in folders.values():
+        os.makedirs(folder_path, exist_ok=True)
+        print(f"Created folder: {folder_path}")
+    
+    return folders, today
+
+def save_news_text(alien_data, today, sequence_num):
+    """Save the alien news text content to a file."""
+    text_content = {
+        "character_name": alien_data['character_name'],
+        "emotion": alien_data['emotion'],
+        "alien_title": alien_data['alien_title'],
+        "alien_content": alien_data['alien_content'],
+        "vocab": alien_data['vocab']
+    }
+    
+    file_path = f"data/text/{today}/alien_news_{today}_{sequence_num}.json"
+    with open(file_path, 'w', encoding='utf-8') as f:
+        json.dump(text_content, f, ensure_ascii=False, indent=2)
+    
+    return file_path
 
 def main():
     # Schedule job to run at midnight HKT
