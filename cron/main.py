@@ -12,6 +12,8 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 import http.client
 import random
+import base64
+from codecs import encode
 
 # Add Runninghub API configuration
 RUNNINGHUB_API_URL = "https://www.runninghub.ai"
@@ -709,6 +711,173 @@ def generate_character_image(character_name, emotion, today, sequence_num):
         print(f"Error details: {repr(e)}")
         return None
 
+def upload_to_runninghub(file_data, file_type):
+    """Upload a file to RunningHub.
+    
+    Args:
+        file_data (bytes): The file data to upload
+        file_type (str): The type of file ('image' or 'audio')
+    
+    Returns:
+        str: The fileName from the response if successful
+        None: If the upload fails
+    """
+    try:
+        # Create connection
+        conn = http.client.HTTPSConnection("www.runninghub.ai")
+        
+        # Create the multipart form data
+        boundary = "---011000010111000001101001"
+        body = []
+        dataList = []
+        
+        # Add API key
+        dataList.append(encode('--' + boundary))
+        dataList.append(encode('Content-Disposition: form-data; name=apiKey;'))
+
+        dataList.append(encode('Content-Type: {}'.format('text/plain')))
+        dataList.append(encode(''))
+        
+        # Add file
+        dataList.append(encode(f"{RUNNINGHUB_API_KEY}"))
+        dataList.append(encode('--' + boundary))
+        dataList.append(encode('Content-Disposition: form-data; name=file; filename="file.{file_type}"'))
+
+        dataList.append(encode('Content-Type: {}'.format(file_type)))
+        dataList.append(encode(''))
+        dataList.append(file_data)
+        dataList.append(encode('--' + boundary))
+        dataList.append(encode('Content-Disposition: form-data; name=fileType;'))
+
+        dataList.append(encode('Content-Type: {}'.format('text/plain')))
+        dataList.append(encode(''))
+    
+        dataList.append(encode("image"))
+        dataList.append(encode('--'+boundary+'--'))
+        dataList.append(encode(''))
+        body = b'\r\n'.join(dataList)
+        payload = body
+        headers = {
+        'Host': 'www.runninghub.ai',
+        'Content-type': 'multipart/form-data; boundary={}'.format(boundary)
+        }
+        conn.request("POST", "/task/openapi/upload", payload, headers)
+        
+        # Get response
+        response = conn.getresponse()
+        response_data = json.loads(response.read().decode("utf-8"))
+
+        print(response_data)
+        
+        if response.status == 200 and response_data.get('code') == 0:
+            file_name = response_data.get('data', {}).get('fileName')
+            if file_name:
+                print(f"Successfully uploaded {file_type} file")
+                print(f"File name: {file_name}")
+                return file_name
+            else:
+                print("No fileName in response data")
+                return None
+        else:
+            error_msg = response_data.get('msg', 'Unknown error')
+            print(f"1. Error uploading {file_type} file: {response.status}")
+            print(f"Error message: {error_msg}")
+            return None
+            
+    except Exception as e:
+        print(f"2. Error uploading {file_type} file: {str(e)}")
+        print(f"Error details: {repr(e)}")
+        return None
+
+def generate_video(audio_path, image_path, today, sequence_num, max_retries=3):
+    """Generate a video by combining audio and image using RunningHub API.
+    
+    Args:
+        audio_path (str): Path to the audio file
+        image_path (str): Path to the image file
+        today (str): Date string for folder organization
+        sequence_num (int): Sequence number for file naming
+        max_retries (int): Maximum number of retry attempts for failed tasks
+    """
+    try:
+        print("\nStarting video generation...")
+        
+        # Read the files
+        with open(audio_path, 'rb') as f:
+            audio_data = f.read()
+        with open(image_path, 'rb') as f:
+            image_data = f.read()
+            
+        # Upload files to RunningHub
+        uploaded_audio = upload_to_runninghub(audio_data, 'audio')
+        uploaded_image = upload_to_runninghub(image_data, 'image')
+        
+        if not uploaded_audio or not uploaded_image:
+            print("Failed to upload audio or image files")
+            return None
+            
+        # Create RunningHub task using the uploaded file names
+        create_response = create_runninghub_task(
+            workflow_id="1911463855787077633",
+            node_info_list=[
+                {
+                    "nodeId": "3",
+                    "fieldName": "image",
+                    "fieldValue": uploaded_image
+                },
+                {
+                    "nodeId": "2",
+                    "fieldName": "audio",
+                    "fieldValue": uploaded_audio
+                }
+            ]
+        )
+        
+        if not create_response:
+            print("Failed to create RunningHub task for video generation")
+            return None
+            
+        task_id = create_response.get('taskId')
+        if not task_id:
+            print("No task ID in RunningHub response for video generation")
+            return None
+            
+        # Wait for task completion and get outputs
+        output = wait_for_runninghub_task(task_id)
+        if not output:
+            print("Video generation task failed or timed out")
+            return None
+            
+        # Get video URL from output
+        video_url = output.get('fileUrl')
+        if not video_url:
+            print("No file URL in video generation task output")
+            return None
+            
+        # Create videos directory if it doesn't exist
+        os.makedirs(f'data/videos/{today}', exist_ok=True)
+            
+        # Download the generated video
+        video_response = requests.get(video_url)
+        if video_response.status_code == 200:
+            # Save the video
+            video_path = f"data/videos/{today}/alien_news_{today}_{sequence_num}.mp4"
+            with open(video_path, 'wb') as f:
+                f.write(video_response.content)
+            
+            print(f"\n✅ Successfully generated video at: {video_path}")
+            print(f"Task cost time: {output.get('taskCostTime', 'unknown')} seconds")
+            return video_path
+        else:
+            print(f"Error downloading video: {video_response.status_code}")
+            return None
+            
+    except Exception as e:
+        print(f"\n❌ Error in video generation:")
+        print(f"Error: {str(e)}")
+        print(f"Error details: {repr(e)}")
+        return None
+
 def check_folders_exist(today):
     """
     Check if all required folders for today's date exist and have content.
@@ -795,7 +964,7 @@ def process_article(article, session, sequence_num):
         # Generate video from audio and image files
         print(f"audio_path : {audio_path}")
         print(f"image_path : {image_path}")
-        video_path = None
+        video_path = generate_video(audio_path, image_path, today, sequence_num)
         
         # Create news entry
         news = News(
