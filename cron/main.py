@@ -1,21 +1,42 @@
+# Standard library imports
 import os
 import time
-import schedule
-import pytz
 import json
-import requests
+import random
+import http.client
+import base64
+import glob
+try:
+    import yaml
+except ImportError:
+    import pyyaml as yaml
+from codecs import encode
 from datetime import datetime
+from typing import Optional, Dict, List, Any
+from io import BytesIO
+
+# Third-party imports
+import pytz
+import schedule
+import requests
 from openai import OpenAI
 from elevenlabs import ElevenLabs
+import PIL.Image
+from google import genai
+from google.genai import types
+
 from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
-import http.client
-import random
-import base64
-from codecs import encode
 
-# Add Runninghub API configuration
+# Local imports
+from did_service import DIDService
+from runninghub_service import RunningHubService
+
+# API configurations
+HEDRA_API_URL = "https://app.v1.hedra.com/api/v1"
+HEDRA_API_KEY = os.getenv('HEDRA_API_KEY')
+
 RUNNINGHUB_API_URL = "https://www.runninghub.ai"
 RUNNINGHUB_API_KEY = os.getenv('RUNNINGHUB_API_KEY')
 
@@ -48,27 +69,42 @@ def setup_database():
     Base.metadata.create_all(engine)
     return engine
 
-def get_news():
+def get_news(num_articles=3):
+    """
+    Fetch news articles from the News API.
+    
+    Args:
+        num_articles (int): Number of articles to return (default: 3)
+        
+    Returns:
+        list: List of news articles, each containing title and description
+    """
     try:
         url = "https://newsapi.org/v2/top-headlines"
         headers = {"X-Api-Key": os.getenv('NEWS_API_KEY')}
         params = {
             "language": "en",
             "country": "us",
-            "category": "general"
+            "category": "general",
+            "pageSize": min(num_articles, 100)  # News API limits to 100 articles max
         }
+
+        print(f"Fetching news with params: {params}")
         
         response = requests.get(url, headers=headers, params=params)
+        print(f"Fetching news response: {response.json()}")
         response.raise_for_status()  # Raise an exception for bad status codes
         
         data = response.json()
-        return data.get('articles', [])[:3]  # Get top 3 articles
+        articles = data.get('articles', [])
+        return articles[:num_articles]  # Return only the requested number of articles
         
     except Exception as e:
         print(f"Error fetching news: {str(e)}")
         return []
 
 def clean_json_response(response_text):
+    print(f"Response text 1: {response_text}")
     """Clean the response text to handle both pure JSON and markdown-wrapped JSON."""
     # Remove markdown code block if present
     if response_text.startswith('```json'):
@@ -87,18 +123,10 @@ def clean_json_response(response_text):
         return json.loads(response_text)
     except json.JSONDecodeError as e:
         print(f"JSON parsing error: {str(e)}")
-        print(f"Response text: {response_text}")
+        print(f"Response text 2: {response_text}")
         raise
 
 def generate_alien_news(original_title, original_content):
-    client = OpenAI(
-        api_key=os.getenv('OPENAI_API_KEY'),
-        base_url="https://openrouter.ai/api/v1",
-        default_headers={
-            "X-Title": "Space English Learning App",
-            "Content-Type": "application/json"
-        }
-    )
     
     prompt = f"""
     You are writing a 30-SECOND audio script for children aged 6-10 years old who are learning English. 
@@ -147,23 +175,41 @@ def generate_alien_news(original_title, original_content):
     """
     
     try:
-        response = client.chat.completions.create(
-            model="deepseek/deepseek-r1:free",
-            messages=[
-                {
-                    "role": "system", 
-                    "content": "You are a friendly alien teacher who explains Earth news to young children (ages 6-10) in a fun, simple way. You always use age-appropriate language and make learning English fun!"
-                },
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.7,
-            max_tokens=1000
-        )
+        # client = OpenAI(
+        #     api_key=os.getenv('OPENAI_API_KEY'),
+        #     base_url="https://openrouter.ai/api/v1",
+        #     default_headers={
+        #         "X-Title": "Space English Learning App",
+        #         "Content-Type": "application/json"
+        #     }
+        # )
+
+        client = genai.Client(api_key=os.getenv('GEMINI_API_KEY'))
         
-        if not response.choices or not response.choices[0].message:
-            raise ValueError("No response received from OpenRouter")
+        # response = client.chat.completions.create(
+        #     model="deepseek/deepseek-r1:free",
+        #     messages=[
+        #         {
+        #             "role": "system", 
+        #             "content": "You are a friendly alien teacher who explains Earth news to young children (ages 6-10) in a fun, simple way. You always use age-appropriate language and make learning English fun!"
+        #         },
+        #         {"role": "user", "content": prompt}
+        #     ],
+        #     temperature=0.7,
+        #     max_tokens=1000
+        # )
+        
+        # if not response.choices or not response.choices[0].message:
+        #     raise ValueError("No response received from OpenRouter")
             
-        content = response.choices[0].message.content
+        # content = response.choices[0].message.content
+
+        response = client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=[prompt]
+        )
+
+        content = response.text
         print(f"Raw response content: {content}")
         return content
         
@@ -172,55 +218,115 @@ def generate_alien_news(original_title, original_content):
         print(f"Full error details: {repr(e)}")
         raise
 
-def get_random_voice():
-    """Get a random voice ID and name from the predefined list."""
+def get_random_voice(gender="male"):
+    """
+    Get a random voice ID and name from the predefined list.
+    
+    Args:
+        gender (str): Preferred gender of the voice ("male", "female", or None for any)
+                     Default is "male"
+    
+    Returns:
+        dict: Voice information with id, name, and gender
+    """
     voices = [
-        {"id": "IKne3meq5aSn9XLyUdCD", "name": "Charlie"}, 
-        {"id": "Xb7hH8MSUJpSbSDYk0k2", "name": "Alice"}, 
-        {"id": "iP95p4xoKVk53GoZ742B", "name": "Chris"}, 
-        {"id": "cjVigY5qzO86Huf0OWal", "name": "Eric"}, 
-        {"id": "cgSgspJ2msm6clMCkdW9", "name": "Jessica"},
-        {"id": "pFZP5JQG7iQjIQuC4Bku", "name": "Lily"},
+        {"id": "IKne3meq5aSn9XLyUdCD", "name": "Charlie", "gender": "male"}, 
+        {"id": "Xb7hH8MSUJpSbSDYk0k2", "name": "Alice", "gender": "female"}, 
+        {"id": "iP95p4xoKVk53GoZ742B", "name": "Chris", "gender": "male"}, 
+        {"id": "cjVigY5qzO86Huf0OWal", "name": "Eric", "gender": "male"}, 
+        {"id": "cgSgspJ2msm6clMCkdW9", "name": "Jessica", "gender": "female"},
+        {"id": "pFZP5JQG7iQjIQuC4Bku", "name": "Lily", "gender": "female"},
     ]
+    
+    # Filter voices by gender if specified
+    if gender:
+        filtered_voices = [voice for voice in voices if voice["gender"] == gender.lower()]
+        # If no voices match the gender, fall back to all voices
+        if filtered_voices:
+            return random.choice(filtered_voices)
+    
+    # Return random voice from all voices if gender is None or no matching voices found
     return random.choice(voices)
 
-def generate_audio(text, today, sequence_num):
-    """Generate audio file using ElevenLabs API."""
+def generate_audio(
+    text: str,
+    timestamp: Optional[str] = None,
+    gender: str = "male",
+    base_path: str = "data",
+    filename: Optional[str] = None,
+    voice: Optional[str] = None
+) -> Optional[str]:
+    """
+    Generate an audio file using the ElevenLabs API
+
+    Args:
+        text: Text to convert to speech
+        timestamp: Timestamp to use in the filename
+        gender: Gender of the voice to use (male/female)
+        base_path: Base directory to save the file to
+        filename: Optional filename to use
+        voice: Optional specific voice dictionary to use
+
+    Returns:
+        Path to the generated audio file
+    """
     try:
-        # Initialize ElevenLabs client
+        # Use timestamp if provided, otherwise generate a new one
+        if not timestamp:
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # Use filename if provided, otherwise generate one
+        audio_filename = filename if filename else f"alien_news_{timestamp}.mp3"
+        
+        # Make sure the audio folder exists
+        os.makedirs(f"{base_path}/audio", exist_ok=True)
+        
+        audio_path = f"{base_path}/audio/{audio_filename}"
+        
+        # Use provided voice if available, otherwise get a random voice based on gender
+        if not voice:
+            voice = get_random_voice(gender)
+            print(f"Using random {gender} voice: {voice.get('name')} ({voice.get('id')})")
+        else:
+            print(f"Using specified voice: {voice.get('name')} ({voice.get('id')})")
+        
         client = ElevenLabs(
             api_key=os.getenv('ELEVENLABS_API_KEY')
         )
-        
-        # Get random voice
-        voice = get_random_voice()
-        
-        # Generate audio with a randomly selected child-friendly voice
-        audio_generator = client.text_to_speech.convert(
+
+        # Call the ElevenLabs API to generate audio
+        audio_response = client.text_to_speech.convert(
             text=text,
             voice_id=voice["id"],
             model_id="eleven_multilingual_v2",  # Latest multilingual model
-            output_format="mp3_44100_128"  # High-quality audio
+            output_format="mp3_44100_128",
         )
         
+        # Handle the response, which could be bytes or a generator
+        if hasattr(audio_response, 'read'):
+            # If it's a file-like object with read method (BytesIO, etc.)
+            audio_data = audio_response.read()
+        elif hasattr(audio_response, '__iter__') and not isinstance(audio_response, (bytes, str)):
+            # If it's an iterable/generator but not already bytes or string
+            # Convert generator to bytes by reading chunks
+            audio_chunks = bytearray()
+            for chunk in audio_response:
+                audio_chunks.extend(chunk)
+            audio_data = bytes(audio_chunks)
+        else:
+            # Assume it's already bytes
+            audio_data = audio_response
+        
         # Save the audio file
-        file_path = f"data/audio/{today}/alien_news_{today}_{sequence_num}.mp3"
+        with open(audio_path, "wb") as audio_file:
+            audio_file.write(audio_data)
         
-        # Convert generator to bytes and write to file
-        audio_bytes = b''.join(chunk for chunk in audio_generator)
-        with open(file_path, 'wb') as f:
-            f.write(audio_bytes)
-        
-        print(f"Successfully generated audio with settings:")
-        print(f"- Voice: {voice['name']} (ID: {voice['id']})")
-        print(f"- Model: eleven_multilingual_v2")
-        print(f"- Output format: mp3_44100_128")
-        print(f"- File path: {file_path}")
-        
-        return file_path
+        print(f"Audio saved to {audio_path}")
+        return audio_path
     except Exception as e:
-        print(f"Error generating audio: {str(e)}")
-        print(f"Error details: {repr(e)}")
+        print(f"Error generating audio: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 def generate_audio_content(alien_title, alien_content, vocab_words):
@@ -256,677 +362,496 @@ def generate_audio_content(alien_title, alien_content, vocab_words):
     """
     return content
 
-def create_runninghub_task(workflow_id, input_data=None, node_info_list=None):
+def get_random_character_attributes(gender=None):
     """
-    Create a task in RunningHub API.
+    Get random character attributes for the alien character.
     
     Args:
-        workflow_id (str): The ID of the workflow to execute
-        input_data (dict, optional): Additional input data for the workflow
-        node_info_list (list, optional): List of node information
+        gender (str, optional): Preferred gender of the character ("male", "female", or None for neutral)
+                               Default is None (neutral appearance)
     
     Returns:
-        dict: Response from the API containing task details
-        None: If the request fails
+        dict: Dictionary of character attributes
     """
-    try:
-        if not RUNNINGHUB_API_KEY:
-            print("Error: RUNNINGHUB_API_KEY environment variable is not set")
-            return None
-
-        # Prepare the payload
-        payload = {
-            "apiKey": RUNNINGHUB_API_KEY,
-            "workflowId": workflow_id,
-        }
-
-        # Add either nodeInfoList or input data with addMetadata
-        if node_info_list is not None:
-            payload["nodeInfoList"] = node_info_list
-        else:
-            payload["addMetadata"] = True
-            if input_data:
-                payload["input"] = input_data
-
-        print(f"Payload: {payload}")
-
-        # Create connection
-        conn = http.client.HTTPSConnection("www.runninghub.ai")
-        
-        headers = {
-            'Host': 'www.runninghub.ai',
-            'Content-Type': 'application/json'
-        }
-
-        # Make the request
-        conn.request(
-            "POST",
-            "/task/openapi/create",
-            json.dumps(payload),
-            headers
-        )
-
-        # Get response
-        response = conn.getresponse()
-        response_data = json.loads(response.read().decode("utf-8"))
-        
-        if response.status == 200 and response_data.get('code') == 0:
-            print(f"Response data: {response_data}")
-            task_data = response_data.get('data', {})
-            task_id = task_data.get('taskId')
-            task_status = task_data.get('taskStatus')
-            
-            if task_id:
-                print(f"Successfully created RunningHub task:")
-                print(f"- Task ID: {task_id}")
-                print(f"- Initial Status: {task_status}")
-                return task_data
-            else:
-                print("No task ID in response data")
-                return None
-        else:
-            error_msg = response_data.get('msg', 'Unknown error')
-            print(f"Error from RunningHub API: {response.status}")
-            print(f"Error message: {error_msg}")
-            print(f"Response: {response_data}")
-            return None
-
-    except Exception as e:
-        print(f"Error creating RunningHub task: {str(e)}")
-        print(f"Error details: {repr(e)}")
-        return None
-
-def check_runninghub_task_status(task_id):
-    """
-    Check the status of a RunningHub task.
-    
-    Args:
-        task_id (str): The ID of the task to check
-    
-    Returns:
-        dict: Response from the API containing code, msg, and data
-        None: If the request fails
-    """
-    try:
-        if not RUNNINGHUB_API_KEY:
-            print("Error: RUNNINGHUB_API_KEY environment variable is not set")
-            return None
-
-        # Prepare the payload
-        payload = {
-            "apiKey": RUNNINGHUB_API_KEY,
-            "taskId": task_id
-        }
-
-        # Create connection
-        conn = http.client.HTTPSConnection("www.runninghub.ai")
-        
-        headers = {
-            'Host': 'www.runninghub.ai',
-            'Content-Type': 'application/json'
-        }
-
-        # Make the request
-        conn.request(
-            "POST",
-            "/task/openapi/status",
-            json.dumps(payload),
-            headers
-        )
-
-        # Get response
-        response = conn.getresponse()
-        response_data = json.loads(response.read().decode("utf-8"))
-
-        print(f"Status check response: {response_data}")
-        
-        if response.status == 200:
-            return response_data
-        else:
-            print(f"Error from RunningHub API: {response.status}")
-            print(f"Response: {response_data}")
-            return None
-
-    except Exception as e:
-        print(f"Error checking RunningHub task status: {str(e)}")
-        print(f"Error details: {repr(e)}")
-        return None
-
-def get_runninghub_task_outputs(task_id):
-    """
-    Get the outputs of a completed RunningHub task.
-    
-    Args:
-        task_id (str): The ID of the task to get outputs for
-    
-    Returns:
-        list: List of output files with their URLs and metadata
-        None: If the request fails
-    """
-    try:
-        if not RUNNINGHUB_API_KEY:
-            print("Error: RUNNINGHUB_API_KEY environment variable is not set")
-            return None
-
-        # Prepare the payload
-        payload = {
-            "apiKey": RUNNINGHUB_API_KEY,
-            "taskId": task_id
-        }
-
-        # Create connection
-        conn = http.client.HTTPSConnection("www.runninghub.ai")
-        
-        headers = {
-            'Host': 'www.runninghub.ai',
-            'Content-Type': 'application/json'
-        }
-
-        # Make the request
-        conn.request(
-            "POST",
-            "/task/openapi/outputs",
-            json.dumps(payload),
-            headers
-        )
-
-        # Get response
-        response = conn.getresponse()
-        response_data = json.loads(response.read().decode("utf-8"))
-        
-        if response.status == 200 and response_data.get('code') == 0:
-            outputs = response_data.get('data', [])
-            if outputs:
-                print(f"Successfully retrieved {len(outputs)} output(s)")
-                return outputs
-            else:
-                print("No outputs found in response")
-                return None
-        else:
-            print(f"Error from RunningHub API: {response.status}")
-            print(f"Response: {response_data}")
-            return None
-
-    except Exception as e:
-        print(f"Error getting RunningHub task outputs: {str(e)}")
-        print(f"Error details: {repr(e)}")
-        return None
-
-def wait_for_runninghub_task(task_id, max_attempts=100, delay_seconds=10):
-    """
-    Wait for a RunningHub task to complete and get its outputs.
-    
-    Args:
-        task_id (str): The ID of the task to wait for
-        max_attempts (int): Maximum number of status check attempts
-        delay_seconds (int): Delay between status checks in seconds
-    
-    Returns:
-        dict: Task outputs if successful
-        None: If the task failed or timed out
-    """
-    print(f"Waiting for RunningHub task {task_id} to complete...")
-    
-    for attempt in range(max_attempts):
-        response = check_runninghub_task_status(task_id)
-        
-        if not response:
-            print(f"Failed to get task status (attempt {attempt + 1}/{max_attempts})")
-            time.sleep(delay_seconds)
-            continue
-        
-        # Print detailed status information
-        print(f"Status check {attempt + 1}/{max_attempts}:")
-        print(f"- Code: {response.get('code')}")
-        print(f"- Message: {response.get('msg', '')}")
-        print(f"- Data: {response.get('data', '')}")
-        
-        code = response.get('code')
-        data = response.get('data', '')
-        
-        if code == 0 and data == 'SUCCESS':
-            print("Task completed successfully!")
-            # Get task outputs
-            outputs = get_runninghub_task_outputs(task_id)
-            if outputs:
-                return outputs[0]  # Return the first output
-            else:
-                print("Task completed but no outputs found")
-                return None
-        elif code == 0 and data == 'FAILED':
-            print("❌ Task failed with status FAILED")
-            return None
-        elif code == 0:
-            # Code 0 but not SUCCESS or FAILED means still running
-            print(f"Task still running (attempt {attempt + 1}/{max_attempts})...")
-            time.sleep(delay_seconds)
-            continue
-        else:
-            # Any other code indicates an error
-            print(f"Task failed with code: {code}")
-            print(f"Error message: {response.get('msg', 'No error message')}")
-            return None
-    
-    print(f"Task timed out after {max_attempts} attempts")
-    return None
-
-def get_random_character_attributes():
-    """Get random character attributes for the alien character."""
     skin_colors = [
-        "iridescent blue", "shimmering green", "metallic purple", 
-        "glowing pink", "crystalline turquoise", "pearlescent silver",
-        "rainbow-shifting", "starry black", "nebula-patterned"
+        "light blue", "mint green", "pale lavender"
     ]
     
-    skin_textures = [
-        "smooth and glossy", "softly glowing", "crystal-like",
-        "semi-translucent", "metallic shimmering", "star-speckled",
-        "holographic", "bubble-like", "cloud-textured"
+    # Gender-specific or neutral hairstyles
+    male_hair_styles = [
+        "short cropped hair", "subtle quiff", "neat side part"
     ]
     
-    hair_styles = [
-        "floating cosmic energy strands", "glowing crystalline spikes",
-        "flowing zero-gravity waves", "geometric holographic patterns",
-        "constellation-like dots", "spiral nebula swirls",
-        "meteor shower streaks", "aurora-like streams",
-        "no hair but glowing markings"
+    female_hair_styles = [
+        "neat bun", "short pixie cut", "shoulder-length waves"
+    ]
+    
+    neutral_hair_styles = [
+        "short tidy style", "medium-length style", "sleek look"
     ]
     
     hair_colors = [
-        "shifting galaxy colors", "pulsing neon", "shimmering rainbow",
-        "star-sparkled silver", "flowing aurora lights", "cosmic gradient",
-        "glowing constellation patterns", "nebula swirls", "meteor shower sparkles"
+        "red", "silver", "pale pink"
     ]
     
-    # Updated to focus on formal business suits with cosmic elements
-    suit_styles = [
-        "classic navy business suit with subtle starlight pinstripes",
-        "charcoal grey suit with constellation pattern lapels",
-        "black formal suit with galaxy-shimmer finish",
-        "traditional business suit with glowing energy trim",
-        "formal three-piece suit with nebula-pattern vest",
-        "professional suit with aurora-like collar accents",
-        "elegant business suit with floating light details",
-        "tailored suit with cosmic dust highlights",
-        "formal attire with holographic pinstripes"
+    # Updated to focus on professional attire with gender variations
+    male_suit_styles = [
+        "professional male news anchor suit in navy blue", 
+        "professional male news anchor suit in charcoal gray",
+        "professional male news anchor suit in dark green"
     ]
     
-    suit_accessories = [
-        "with a floating cosmic tie",
-        "with a crystalline pocket square",
-        "with glowing cufflinks",
-        "with a shimmering lapel pin",
-        "with an energy-field bowtie",
-        "with a starlight-trimmed collar",
-        "with nebula-pattern buttons",
-        "with an aurora-effect tie clip",
-        "with constellation-pattern trim"
+    female_suit_styles = [
+        "professional female news anchor blazer in light gray",
+        "professional female news anchor outfit in beige",
+        "professional female news anchor blouse and blazer in navy"
     ]
     
-    # Combine suit style with an accessory
-    outfit = f"{random.choice(suit_styles)} {random.choice(suit_accessories)}"
+    neutral_suit_styles = [
+        "professional news anchor outfit in neutral tones",
+        "clean, professional news anchor attire",
+        "modern news presenter outfit"
+    ]
     
-    unique_features = [
-        "crystal antennae that glow with emotions", "floating orbital accessories",
-        "holographic patterns that shift with mood", "constellation freckles",
-        "geometric energy markings", "floating light particles around them",
-        "aurora-like aura", "star-like sparkles in their eyes",
-        "nebula patterns that swirl on their skin"
+    # Features that can be gender-influenced
+    male_features = [
+        "defined jawline with slight freckles",
+        "human-like face structure with neat appearance",
+        "expressive eyes with defined features"
+    ]
+    
+    female_features = [
+        "soft features with slight freckles",
+        "human-like face structure with gentle curves",
+        "large expressive eyes with softer features"
+    ]
+    
+    neutral_features = [
+        "balanced facial features with slight freckles",
+        "human-like face structure for facial detection",
+        "expressive eyes with clear nose and lips"
     ]
 
     # Base newsroom template with variations
-    newsroom_base = "space station newsroom with floating screens and a news desk"
-    newsroom_backgrounds = [
-        "swirling galaxy", "twinkling stars", "aurora lights",
-        "nebula clouds", "meteor shower", "cosmic dust",
-        "planetary rings", "shooting stars", "space phenomena"
-    ]
+    newsroom_base = "modern news studio with digital screens and a news desk"
     
-    newsroom_desk_features = [
-        "holographic displays", "floating data streams",
-        "glowing control panels", "orbiting microphones",
-        "energy field barriers", "crystal decorations",
-        "anti-gravity props", "light beam accents",
-        "star map projections"
-    ]
-    
-    newsroom_lighting = [
-        "soft cosmic glow", "pulsing star lights",
-        "rainbow aurora effects", "crystal refraction patterns",
-        "nebula-like illumination", "constellation spotlights",
-        "meteor streak lighting", "plasma field ambiance",
-        "quantum light particles"
-    ]
-
-    # Art styles specific to newsroom setting
-    art_styles = [
-        "clean and modern cartoon with soft gradients",
-        "semi-realistic cartoon with glowing effects",
-        "stylized animation with dynamic lighting",
-        "cute chibi style with sparkle effects",
-        "sleek vector art with cosmic highlights",
-        "playful cartoon with ethereal elements",
-        "polished 3D cartoon style with glow effects",
-        "whimsical illustration with space themes",
-        "geometric cartoon with light ray accents"
-    ]
-    
-    # Combine elements for a consistent but varied newsroom setting
-    setting = f"{newsroom_base} featuring a {random.choice(newsroom_backgrounds)} background, {random.choice(newsroom_desk_features)}, and {random.choice(newsroom_lighting)}"
+    # Select attributes based on gender preference
+    if gender and gender.lower() == "male":
+        hair_style = random.choice(male_hair_styles)
+        outfit = random.choice(male_suit_styles)
+        unique_feature = random.choice(male_features)
+    elif gender and gender.lower() == "female":
+        hair_style = random.choice(female_hair_styles)
+        outfit = random.choice(female_suit_styles)
+        unique_feature = random.choice(female_features)
+    else:
+        hair_style = random.choice(neutral_hair_styles)
+        outfit = random.choice(neutral_suit_styles)
+        unique_feature = random.choice(neutral_features)
     
     return {
         'skin_color': random.choice(skin_colors),
-        'skin_texture': random.choice(skin_textures),
-        'hair_style': random.choice(hair_styles),
+        'hair_style': hair_style,
         'hair_color': random.choice(hair_colors),
         'outfit': outfit,
-        'unique_feature': random.choice(unique_features),
-        'setting': setting,
-        'art_style': random.choice(art_styles)
+        'unique_feature': unique_feature,
+        'setting': newsroom_base,
+        'gender': gender.lower() if gender else "neutral"
     }
 
-def generate_character_image(character_name, emotion, today, sequence_num):
-    """Generate a cartoon image of the alien character with the specified emotion using RunningHub API."""
+def get_random_character_file(resource_dir="resource/characters"):
+    """
+    Randomly select a character file from the resource/characters directory and parse its YAML content.
+    
+    Args:
+        resource_dir (str): Path to the directory containing character YAML files
+        
+    Returns:
+        dict: The parsed YAML data from the selected file, or None if no files found or error occurs
+    """
     try:
-        # Get random character attributes
-        attrs = get_random_character_attributes()
+        # Ensure the directory exists
+        if not os.path.isdir(resource_dir):
+            print(f"Character resource directory not found: {resource_dir}")
+            return None
+            
+        # Get all YAML files in the directory
+        yaml_files = glob.glob(os.path.join(resource_dir, "*.yaml"))
+        yaml_files.extend(glob.glob(os.path.join(resource_dir, "*.yml")))
         
-        # Create a detailed prompt for the alien character
-        prompt = f"""Create a cute cartoon alien character named {character_name} for children's education:
-        - Art Style: {attrs['art_style']}
-        - Big expressive eyes showing {emotion} emotion
-        - A cute alien news reporter with unique features:
-          * Skin: {attrs['skin_color']} with {attrs['skin_texture']} texture
-          * Hair: {attrs['hair_style']} in {attrs['hair_color']}
-          * Wearing: {attrs['outfit']}
-          * Special Feature: {attrs['unique_feature']}
-        - The character should be expressing {emotion} in a way that's clear and appealing to children
-        - Setting: {attrs['setting']}
+        if not yaml_files:
+            print(f"No YAML files found in {resource_dir}")
+            return None
+            
+        # Randomly select a file
+        selected_file = random.choice(yaml_files)
+        print(f"Selected character file: {selected_file}")
         
-        Important requirements:
-        1. Keep the character design simple and recognizable despite the special features
-        2. Make sure the {emotion} emotion is clearly visible in the expression
-        3. Ensure all elements are appropriate for children
-        4. Maintain a bright, well-lit composition
-        5. The character should be the main focus of the image, with the newsroom setting as a backdrop
-        6. The newsroom setting should be visible but not overwhelming"""
+        # Parse the YAML file
+        with open(selected_file, 'r', encoding='utf-8') as file:
+            character_data = yaml.safe_load(file)
+            
+        return character_data
         
+    except Exception as e:
+        print(f"Error selecting character file: {str(e)}")
+        print(f"Error details: {repr(e)}")
+        return None
+
+def generate_character_image(character_name, emotion, timestamp, gender=None, base_path="data", use_character_file=False, service="runninghub"):
+    """
+    Generate a hyper-realistic portrait of the alien character with the specified emotion.
+    
+    Args:
+        character_name: Name of the alien character
+        emotion: Emotional state of the character
+        timestamp: Timestamp string in YYYYMMDDhhmmss format
+        gender: Preferred gender presentation of the character ("male", "female", or None for neutral)
+        base_path: Base path for saving files
+        use_character_file: Whether to use predefined character data from YAML files
+        service: Service to use for image generation ("runninghub" or "gemini")
+        
+    Returns:
+        tuple: (image_path, prompt) if successful, (None, None) if failed
+            - image_path (str): Path to the generated image
+            - prompt (str): The prompt used to generate the image
+    """
+    try:
+        # Determine character attributes source
+        character_file_data = None
+        if use_character_file:
+            character_file_data = get_random_character_file()
+            if character_file_data:
+                print(f"Using character data from file: {character_file_data}")
+        
+        prompt = ""
+        character_gender = gender
+        
+        # If using character file and it contains appearance data
+        if character_file_data and 'appearance' in character_file_data:
+            # Determine gender from appearance/personality or fall back to parameter
+            appearance = character_file_data.get('appearance', '')
+            personality = character_file_data.get('personality', '')
+            appearance_lower = appearance.lower()
+            
+            if "male" in appearance_lower or "he" in personality.lower().split():
+                character_gender = "male"
+            elif "female" in appearance_lower or "she" in personality.lower().split():
+                character_gender = "female"
+            
+            gender_descriptor = ""
+            if character_gender == "male":
+                gender_descriptor = "male-presenting"
+            elif character_gender == "female":
+                gender_descriptor = "female-presenting"
+            
+            # Create a detailed prompt using the full appearance description
+            prompt = f"""A captivating and hyper-realistic portrait of a cute and friendly {gender_descriptor if character_gender else ""} humanoid alien journalist, clearly the central focus of the image, sitting confidently in a bright and modern news studio setting.
+
+The alien has the following appearance: {appearance}
+
+The alien displays a warm and inviting smile, with an overall {emotion} expression that is appealing to children. The background showcases a bright and tidy news studio, visible but intentionally out of focus to keep the alien as the primary subject. The scene includes subtle elements like digital news screens displaying graphics (not readable text), soft studio lights casting a clean white illumination, and a portion of a news desk in the foreground or background. The overall composition feels like a professional headshot with a clean and inviting backdrop.
+
+The lighting is soft and even, ensuring a bright and well-lit composition. The entire scene communicates a sense of professionalism and approachability. Emphasis on a distinct humanoid alien character as the clear subject in a news studio environment."""
+
+            # Add personality traits if available from character file
+            if 'personality' in character_file_data:
+                personality_traits = character_file_data['personality']
+                prompt += f"\n\nThis character named {character_file_data.get('name', character_name)} should portray {personality_traits} through their demeanor and expression."
+                
+            # Add age information if available
+            if 'age' in character_file_data:
+                prompt += f"\n\nThe character is {character_file_data['age']} years old."
+                
+        else:
+            # Fall back to randomly generated attributes if no character file or missing appearance
+            attrs = get_random_character_attributes(gender)
+            character_gender = attrs.get('gender')
+            
+            # Gender-specific pronouns and descriptors
+            gender_descriptor = ""
+            if character_gender == "male":
+                gender_descriptor = "male-presenting"
+            elif character_gender == "female":
+                gender_descriptor = "female-presenting"
+            
+            # Create a detailed prompt for the alien character using generated attributes
+            prompt = f"""A captivating and hyper-realistic portrait of a cute and friendly {gender_descriptor if character_gender != 'neutral' else ""} humanoid alien journalist, clearly the central focus of the image, sitting confidently in a bright and modern news studio setting. 
+
+The alien has a distinctly human-like face with {attrs['unique_feature']}. Its skin possesses a unique {attrs['skin_color']} tone. The alien's hair is styled in a {attrs['hair_style']} of {attrs['hair_color']} color. The alien is dressed in a professional {attrs['outfit']}.
+
+The background showcases a bright and tidy news studio, visible but intentionally out of focus to keep the alien as the primary subject. The scene includes subtle elements like digital news screens displaying graphics (not readable text), soft studio lights casting a clean white illumination, and a portion of a news desk in the foreground or background. The overall composition feels like a professional headshot with a clean and inviting backdrop.
+
+The alien displays a warm and inviting smile, with an overall {emotion} expression that is appealing to children. The lighting is soft and even, ensuring a bright and well-lit composition. The entire scene communicates a sense of professionalism and approachability. Emphasis on a distinct humanoid alien character as the clear subject in a news studio environment."""
+
+        print(f"generate_character_image : Prompt: {prompt}")
+        
+        # Extract date for folder structure (first 8 characters of timestamp)
+        date = timestamp[:8]
+        
+        # Create output path
+        os.makedirs(f"{base_path}/images/{date}", exist_ok=True)
+        image_path = f"{base_path}/images/{date}/alien_news_{timestamp}.png"
+        
+        # Generate image based on selected service
+        if service.lower() == "gemini":
+            return generate_image_with_gemini(prompt, image_path, character_gender)
+        else:
+            return generate_image_with_runninghub(prompt, image_path, character_gender)
+            
+    except Exception as e:
+        print(f"Error generating image: {str(e)}")
+        print(f"Error details: {repr(e)}")
+        return None, None
+
+def generate_image_with_runninghub(prompt, image_path, character_gender):
+    """
+    Generate an image using RunningHub API.
+    
+    Args:
+        prompt: The text prompt for image generation
+        image_path: Path to save the generated image
+        character_gender: Gender of the character (for logging)
+        
+    Returns:
+        tuple: (image_path, prompt) if successful, (None, None) if failed
+    """
+    try:
+        # Initialize RunningHub service
+        runninghub_service = RunningHubService()
+
         # Create RunningHub task
-        create_response = create_runninghub_task(
-            workflow_id="1912608474486796289",  # Your workflow ID for image generation
-            node_info_list=[
-                {
-                    "nodeId": "50",
-                    "fieldName": "text",
-                    "fieldValue": prompt
-                }
-            ]
+        node_info_list = [
+            {
+                "nodeId": "50",
+                "fieldName": "text",
+                "fieldValue": prompt
+            }
+        ]
+
+        print(f"RunningHub task data: {node_info_list}")
+
+        # Create task and get task ID
+        task_data = runninghub_service.create_task(
+            workflow_id="1912608474486796289",  # Workflow ID for image generation
+            node_info_list=node_info_list
         )
         
-        if not create_response:
+        if not task_data:
             print("Failed to create RunningHub task")
-            return None
+            return None, None
             
-        task_id = create_response.get('taskId')
+        task_id = task_data.get('taskId')
         if not task_id:
             print("No task ID in RunningHub response")
-            return None
+            return None, None
             
         # Wait for task completion and get outputs
-        output = wait_for_runninghub_task(task_id)
+        output = runninghub_service.wait_for_task(task_id)
         if not output:
             print("Task failed or timed out")
-            return None
+            return None, None
             
         # Get image URL from output
         image_url = output.get('fileUrl')
         if not image_url:
             print("No file URL in task output")
-            return None
+            return None, None
             
         # Download the generated image
         image_response = requests.get(image_url)
         if image_response.status_code == 200:
             # Save the image
-            image_path = f"data/images/{today}/alien_news_{today}_{sequence_num}.png"
             with open(image_path, 'wb') as f:
                 f.write(image_response.content)
             
-            print(f"Successfully generated image at: {image_path}")
-            print(f"Character attributes used:")
-            print(f"- Art Style: {attrs['art_style']}")
-            print(f"- Skin: {attrs['skin_color']} with {attrs['skin_texture']} texture")
-            print(f"- Hair: {attrs['hair_style']} in {attrs['hair_color']}")
-            print(f"- Outfit: {attrs['outfit']}")
-            print(f"- Special Feature: {attrs['unique_feature']}")
-            print(f"- Setting: {attrs['setting']}")
-            print(f"Task cost time: {output.get('taskCostTime', 'unknown')} seconds")
+            print(f"Successfully generated {character_gender} alien image with RunningHub at: {image_path}")
             return image_path
         else:
             print(f"Error downloading image: {image_response.status_code}")
-            return None
-            
+            return None, None
+    
     except Exception as e:
-        print(f"Error generating image: {str(e)}")
-        print(f"Error details: {repr(e)}")
-        return None
+        print(f"Error in RunningHub image generation: {str(e)}")
+        return None, None
 
-def upload_to_runninghub(file_data, file_type):
-    """Upload a file to RunningHub.
+def generate_image_with_gemini(prompt, image_path, character_gender):
+    """
+    Generate an image using Google Gemini model.
     
     Args:
-        file_data (bytes): The file data to upload
-        file_type (str): The type of file ('image' or 'audio')
-    
+        prompt: The text prompt for image generation
+        image_path: Path to save the generated image
+        character_gender: Gender of the character (for logging)
+        
     Returns:
-        str: The fileName from the response if successful
-        None: If the upload fails
+        tuple: (image_path, prompt) if successful, (None, None) if failed
     """
-    try:
-        # Create connection
-        conn = http.client.HTTPSConnection("www.runninghub.ai")
+    try:    
+        # Initialize Google Gemini client
+        client = genai.Client(api_key=os.getenv('GEMINI_API_KEY'))
+        reference_image = PIL.Image.open('resource/reference_image/image.png')
+        print(f"Reference image")
         
-        # Create the multipart form data
-        boundary = "---011000010111000001101001"
-        body = []
-        dataList = []
+        # Prepare text input
+        text_input = "Reference image to be used as a style guide, generate an image based on the style guide: " + prompt
         
-        # Add API key
-        dataList.append(encode('--' + boundary))
-        dataList.append(encode('Content-Disposition: form-data; name=apiKey;'))
-
-        dataList.append(encode('Content-Type: {}'.format('text/plain')))
-        dataList.append(encode(''))
+        print(f"Sending prompt to Gemini for image generation...")
         
-        # Add file
-        dataList.append(encode(f"{RUNNINGHUB_API_KEY}"))
-        dataList.append(encode('--' + boundary))
-        dataList.append(encode('Content-Disposition: form-data; name=file; filename="file.{file_type}"'))
-
-        dataList.append(encode('Content-Type: {}'.format(file_type)))
-        dataList.append(encode(''))
-        dataList.append(file_data)
-        dataList.append(encode('--' + boundary))
-        dataList.append(encode('Content-Disposition: form-data; name=fileType;'))
-
-        dataList.append(encode('Content-Type: {}'.format('text/plain')))
-        dataList.append(encode(''))
-    
-        dataList.append(encode("image"))
-        dataList.append(encode('--'+boundary+'--'))
-        dataList.append(encode(''))
-        body = b'\r\n'.join(dataList)
-        payload = body
-        headers = {
-        'Host': 'www.runninghub.ai',
-        'Content-type': 'multipart/form-data; boundary={}'.format(boundary)
-        }
-        conn.request("POST", "/task/openapi/upload", payload, headers)
-        
-        # Get response
-        response = conn.getresponse()
-        response_data = json.loads(response.read().decode("utf-8"))
-
-        print(response_data)
-        
-        if response.status == 200 and response_data.get('code') == 0:
-            file_name = response_data.get('data', {}).get('fileName')
-            if file_name:
-                print(f"Successfully uploaded {file_type} file")
-                print(f"File name: {file_name}")
-                return file_name
-            else:
-                print("No fileName in response data")
-                return None
-        else:
-            error_msg = response_data.get('msg', 'Unknown error')
-            print(f"1. Error uploading {file_type} file: {response.status}")
-            print(f"Error message: {error_msg}")
-            return None
-            
-    except Exception as e:
-        print(f"2. Error uploading {file_type} file: {str(e)}")
-        print(f"Error details: {repr(e)}")
-        return None
-
-def generate_video(audio_path, image_path, today, sequence_num, max_retries=3):
-    """Generate a video by combining audio and image using RunningHub API.
-    
-    Args:
-        audio_path (str): Path to the audio file
-        image_path (str): Path to the image file
-        today (str): Date string for folder organization
-        sequence_num (int): Sequence number for file naming
-        max_retries (int): Maximum number of retry attempts for failed tasks
-    """
-    try:
-        print("\nStarting video generation...")
-        
-        # Read the files
-        with open(audio_path, 'rb') as f:
-            audio_data = f.read()
-        with open(image_path, 'rb') as f:
-            image_data = f.read()
-            
-        # Upload files to RunningHub
-        uploaded_audio = upload_to_runninghub(audio_data, 'audio')
-        uploaded_image = upload_to_runninghub(image_data, 'image')
-        
-        if not uploaded_audio or not uploaded_image:
-            print("Failed to upload audio or image files")
-            return None
-            
-        # Create RunningHub task using the uploaded file names
-        create_response = create_runninghub_task(
-            workflow_id="1911463855787077633",
-            node_info_list=[
-                {
-                    "nodeId": "3",
-                    "fieldName": "image",
-                    "fieldValue": uploaded_image
-                },
-                {
-                    "nodeId": "2",
-                    "fieldName": "audio",
-                    "fieldValue": uploaded_audio
-                }
-            ]
+        # Generate image with Gemini
+        response = client.models.generate_content(
+            model="gemini-2.0-flash-exp-image-generation",
+            contents=[text_input, reference_image],
+            config=types.GenerateContentConfig(
+                response_modalities=['TEXT', 'IMAGE']
+            )
         )
         
-        if not create_response:
-            print("Failed to create RunningHub task for video generation")
-            return None
+        # Process the response
+        image_data = None
+        for part in response.candidates[0].content.parts:
+            if part.inline_data is not None:
+                image_data = part.inline_data.data
+                break
+        
+        if not image_data:
+            print("No image data in Gemini response")
+            return None, None
             
-        task_id = create_response.get('taskId')
-        if not task_id:
-            print("No task ID in RunningHub response for video generation")
-            return None
-            
-        # Wait for task completion and get outputs
-        output = wait_for_runninghub_task(task_id)
-        if not output:
-            print("Video generation task failed or timed out")
-            return None
-            
-        # Get video URL from output
-        video_url = output.get('fileUrl')
-        if not video_url:
-            print("No file URL in video generation task output")
-            return None
-            
-        # Create videos directory if it doesn't exist
-        os.makedirs(f'data/videos/{today}', exist_ok=True)
-            
-        # Download the generated video
-        video_response = requests.get(video_url)
-        if video_response.status_code == 200:
-            # Save the video
-            video_path = f"data/videos/{today}/alien_news_{today}_{sequence_num}.mp4"
-            with open(video_path, 'wb') as f:
-                f.write(video_response.content)
-            
-            print(f"\n✅ Successfully generated video at: {video_path}")
-            print(f"Task cost time: {output.get('taskCostTime', 'unknown')} seconds")
-            return video_path
-        else:
-            print(f"Error downloading video: {video_response.status_code}")
-            return None
-            
+        # Save the image
+        image = PIL.Image.open(BytesIO(image_data))
+        image.save(image_path)
+        
+        print(f"Successfully generated {character_gender} alien image with Gemini at: {image_path}")
+        return image_path
+        
     except Exception as e:
-        print(f"\n❌ Error in video generation:")
-        print(f"Error: {str(e)}")
+        print(f"Error in Gemini image generation: {str(e)}")
+        print(f"Error details: {repr(e)}")
+        # which line is the error?
+        print(f"Error line: {e.__traceback__.tb_lineno}")
+        return None, None
+
+def generate_video(
+    image_path: str,
+    audio_path: Optional[str] = None,
+    text: Optional[str] = None,
+    voice_id: Optional[str] = None,
+    output_path: str = "data/video/output.mp4",
+    service: str = "runninghub"
+) -> Optional[str]:
+    """
+    Generate a video using either RunningHub or D-ID service.
+    
+    Args:
+        image_path: Path to the source image
+        audio_path: Path to the audio file (optional)
+        text: Text to be spoken (optional)
+        voice_id: Voice ID for text-to-speech (optional)
+        output_path: Path where the output video will be saved
+        service: Service to use for video generation ("runninghub" or "did")
+        
+    Returns:
+        str: Path to the generated video if successful, None otherwise
+        
+    Note:
+        For D-ID service, either audio_path OR (text AND voice_id) must be provided
+    """
+    try:
+        print(f"\nStarting video generation using {service}...")
+        
+        # Create directory for output if it doesn't exist
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        
+        if service == "runninghub":
+            if not audio_path:
+                print("Error: RunningHub service requires audio_path")
+                return None
+                
+            runninghub_service = RunningHubService()
+            return runninghub_service.generate_video(image_path, audio_path, output_path)
+            
+        elif service == "did":
+            if not audio_path and not (text and voice_id):
+                print("Error: D-ID service requires either audio_path or both text and voice_id")
+                return None
+                
+            did_service = DIDService()
+            # Use the did_service's generate_video method which now supports both audio and text
+            return did_service.generate_video(
+                image_path=image_path,
+                audio_path=audio_path,
+                text=text,
+                voice_id=voice_id,
+                output_path=output_path
+            )
+                
+        else:
+            print(f"Unsupported service: {service}")
+            return None
+        
+    except Exception as e:
+        print(f"Error generating video: {str(e)}")
         print(f"Error details: {repr(e)}")
         return None
 
-def check_folders_exist(today):
+def check_folders_exist(date, base_path="data"):
     """
     Check if all required folders for today's date exist and have content.
     
     Args:
-        today (str): Date string in YYYYMMDD format
+        date (str): Date string in YYYYMMDD format
+        base_path (str): Base path for data storage (default: "data")
         
     Returns:
         bool: True if all folders exist and have content, False otherwise
     """
     required_folders = {
-        'text': f'data/text/{today}',
-        'audio': f'data/audio/{today}',
-        'images': f'data/images/{today}',
-        'videos': f'data/videos/{today}'
+        'text': f'{base_path}/text/{date}',
+        'audio': f'{base_path}/audio/{date}',
+        'images': f'{base_path}/images/{date}',
+        'videos': f'{base_path}/videos/{date}'
     }
     
     try:
-        # Check if all folders exist
+        # Create folders if they don't exist
         for folder_path in required_folders.values():
-            if not os.path.exists(folder_path):
-                print(f"Folder {folder_path} does not exist")
-                return False
-            
-            # Check if folder has any files
-            files = os.listdir(folder_path)
-            if not files:
-                print(f"Folder {folder_path} is empty")
-                return False
-            
-            # Check if files match the expected pattern
-            pattern = f"alien_news_{today}_"
-            matching_files = [f for f in files if f.startswith(pattern)]
-            if not matching_files:
-                print(f"No matching files found in {folder_path}")
-                return False
+            os.makedirs(folder_path, exist_ok=True)
+            print(f"Created/checked folder: {folder_path}")
         
-        print(f"All required folders for {today} exist and have content")
         return True
         
     except Exception as e:
-        print(f"Error checking folders: {str(e)}")
+        print(f"Error checking/creating folders: {str(e)}")
         return False
 
-def process_article(article, session, sequence_num):
-    """Process a single news article with image, audio, and video generation."""
+def process_article(article, session, base_path="data", service="runninghub", use_character_file=False, image_service="runninghub"):
+    """
+    Process a single news article with image, audio, and video generation.
+    
+    Args:
+        article: News article data (title, description)
+        session: Database session
+        base_path: Base path for saving files
+        service: Video service to use ('runninghub' or 'did')
+        use_character_file: Whether to use predefined character data from YAML files
+        image_service: Service to use for image generation ('runninghub' or 'gemini')
+    
+    Returns:
+        News: Database entry if successful, None otherwise
+    """
     try:
-        # Create date-based folders
-        folders, today = create_date_folders()
+        # Generate timestamp in YYYYMMDDhhmmss format
+        timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+        date = timestamp[:8]  # Extract date part for folder structure
+        
+        if not check_folders_exist(date, base_path=base_path):
+            print("Failed to create required folders")
+            return None
+        
+        # Randomly select gender for this article (male or female)
+        gender = random.choice(["male", "female"])
+        print(f"Randomly selected gender for character: {gender}")
         
         alien_news = generate_alien_news(article['title'], article['description'])
         alien_data = clean_json_response(alien_news)
@@ -938,15 +863,31 @@ def process_article(article, session, sequence_num):
         print(f"Alien Title: {alien_data['alien_title']}")
         print(f"Alien Content: {alien_data['alien_content']}")
         
-        # Save text content
-        text_path = save_news_text(alien_data, today, sequence_num)
+        # Save text content with gender information
+        text_path = save_news_text(alien_data, timestamp, base_path=base_path, gender=gender)
         
         # Use the generated emotion directly
         emotion = alien_data['emotion']
+        character_name = alien_data['character_name']
+
         
-        # Generate character image using the generated character name and emotion
-        image_path = generate_character_image(alien_data['character_name'], emotion, today, sequence_num)
+        # Generate character image using the generated character name, emotion, and gender
+        image_path = generate_character_image(
+            character_name, 
+            emotion, 
+            timestamp, 
+            gender=gender, 
+            base_path=base_path,
+            use_character_file=use_character_file,
+            service=image_service
+        )
+
+        print(f"process_article : Image path: {image_path}")
         
+        if not image_path:
+            print("Failed to generate image")
+            return None
+            
         # Generate audio content
         audio_text = generate_audio_content(
             alien_data['alien_title'],
@@ -954,17 +895,56 @@ def process_article(article, session, sequence_num):
             alien_data['vocab']
         )
         
-        # Generate and save audio file
-        audio_path = generate_audio(audio_text, today, sequence_num)
+        # Create output path for video
+        os.makedirs(f"{base_path}/videos/{date}", exist_ok=True)
+        video_output_path = f"{base_path}/videos/{date}/alien_news_{timestamp}.mp4"
         
-        if not audio_path or not image_path:
-            print("Failed to generate audio or image")
-            return None
+        # For RunningHub, we need to generate audio file
+        # For D-ID, we can use either audio file or text directly
+        audio_path = None
+        if service == "runninghub" or (service == "did" and not os.getenv('USE_DID_TEXT_TO_SPEECH')):
+            # Generate and save audio file with the randomly selected gender
+            audio_path = generate_audio(
+                text=audio_text, 
+                timestamp=timestamp, 
+                gender=gender, 
+                base_path=base_path
+            )
             
-        # Generate video from audio and image files
-        print(f"audio_path : {audio_path}")
-        print(f"image_path : {image_path}")
-        video_path = generate_video(audio_path, image_path, today, sequence_num)
+            if not audio_path:
+                print("Failed to generate audio")
+                return None
+                
+            # Generate video from audio and image files
+            print(f"audio_path: {audio_path}")
+            print(f"image_path: {image_path}")
+            
+            video_path = generate_video(
+                image_path=image_path,
+                audio_path=audio_path,
+                output_path=video_output_path,
+                service=service
+            )
+        else:
+            # Use D-ID with text-to-speech
+            print(f"Using D-ID with text-to-speech")
+            print(f"image_path: {image_path}")
+
+            # Get voice with the randomly selected gender
+            voice = get_random_voice(gender)
+            voice_id = voice["id"]
+            
+            video_path = generate_video(
+                image_path=image_path,
+                text=audio_text,
+                voice_id=voice_id,
+                output_path=video_output_path,
+                service=service
+            )
+        
+        if not video_path:
+            print("Failed to generate video")
+            return None
         
         # Create news entry
         news = News(
@@ -984,9 +964,10 @@ def process_article(article, session, sequence_num):
         )
         
         session.add(news)
-        print(f"Generated files for article {sequence_num}:")
+        print(f"Generated files for article {timestamp}:")
         print(f"- Text: {text_path}")
-        print(f"- Audio: {audio_path}")
+        if audio_path:
+            print(f"- Audio: {audio_path}")
         print(f"- Image: {image_path}")
         print(f"- Video: {video_path}")
         print('--------------------------------')
@@ -996,18 +977,31 @@ def process_article(article, session, sequence_num):
     except Exception as e:
         print(f"Error processing article: {str(e)}")
         print(f"Error details: {repr(e)}")
+        print(f"Error line: {e.__traceback__.tb_lineno}")
         return None
 
-def job():
-    print(f"Starting news fetch at {datetime.now()}")
+def job(base_path="data", service="runninghub", use_character_file=False, image_service="runninghub"):
+    """
+    Main job function to fetch news and process articles.
     
-    # Get today's date in YYYYMMDD format
-    today = datetime.now().strftime('%Y%m%d')
+    Args:
+        base_path: Base path for data storage (default: "data")
+        service: Video service to use (default: "runninghub")
+        use_character_file: Whether to use predefined character data from YAML files
+        image_service: Service to use for image generation ('runninghub' or 'gemini')
+    """
+    print(f"Starting news fetch at {datetime.now()}")
+    print(f"Using video service: {service}")
+    print(f"Using image service: {image_service}")
+    print(f"Base path: {base_path}")
+    print(f"Using character files: {use_character_file}")
+    
+    # Get today's date in YYYYMMDD format for folder structure
+    date = datetime.now().strftime('%Y%m%d')
     
     # Check if today's folders already exist and have content
-    if check_folders_exist(today):
-        print(f"Content for {today} already exists. Skipping job.")
-        return
+    if check_folders_exist(date, base_path=base_path):
+        print(f"Folders for {date} created successfully.")
     
     engine = setup_database()
     Session = sessionmaker(bind=engine)
@@ -1018,9 +1012,15 @@ def job():
         print(f"Found {len(articles)} articles to process")
         
         successful_articles = 0
-        for i, article in enumerate(articles, 1):
-            print(f"\nProcessing article {i} of {len(articles)}")
-            if process_article(article, session, i):
+        for article in articles:
+            if process_article(
+                article, 
+                session, 
+                base_path=base_path, 
+                service=service, 
+                use_character_file=use_character_file,
+                image_service=image_service
+            ):
                 successful_articles += 1
         
         session.commit()
@@ -1033,25 +1033,18 @@ def job():
     finally:
         session.close()
 
-def create_date_folders():
-    """Create date-based folders for organizing content."""
-    today = datetime.now().strftime('%Y%m%d')
+def save_news_text(alien_data, timestamp, base_path="data", gender=None):
+    """Save the alien news text content to a file.
     
-    folders = {
-        'text': f'data/text/{today}',
-        'audio': f'data/audio/{today}',
-        'images': f'data/images/{today}',
-        'videos': f'data/videos/{today}'
-    }
+    Args:
+        alien_data: Dictionary with alien news content
+        timestamp: Timestamp string in YYYYMMDDhhmmss format
+        base_path: Base path for saving files
+        gender: Gender of the character (optional)
     
-    for folder_path in folders.values():
-        os.makedirs(folder_path, exist_ok=True)
-        print(f"Created folder: {folder_path}")
-    
-    return folders, today
-
-def save_news_text(alien_data, today, sequence_num):
-    """Save the alien news text content to a file."""
+    Returns:
+        str: Path to the saved text file
+    """
     text_content = {
         "character_name": alien_data['character_name'],
         "emotion": alien_data['emotion'],
@@ -1060,24 +1053,77 @@ def save_news_text(alien_data, today, sequence_num):
         "vocab": alien_data['vocab']
     }
     
-    file_path = f"data/text/{today}/alien_news_{today}_{sequence_num}.json"
+    # Add gender if provided
+    if gender:
+        text_content["gender"] = gender
+    
+    # Extract date for folder structure (first 8 characters of timestamp)
+    date = timestamp[:8]
+    
+    # Create directory if it doesn't exist
+    os.makedirs(f"{base_path}/text/{date}", exist_ok=True)
+    
+    file_path = f"{base_path}/text/{date}/alien_news_{timestamp}.json"
     with open(file_path, 'w', encoding='utf-8') as f:
         json.dump(text_content, f, ensure_ascii=False, indent=2)
     
     return file_path
 
 def main():
-    # Schedule job to run at midnight HKT
-    hkt = pytz.timezone('Asia/Hong_Kong')
-    schedule.every().day.at("00:00").do(job)
+    """Main function to run the scheduled job or process command line arguments."""
+    import argparse
     
-    # Run job immediately on startup
-    job()
+    parser = argparse.ArgumentParser(description='Alien News Generator')
+    parser.add_argument('--run-now', action='store_true', help='Run the job immediately')
+    parser.add_argument('--service', choices=['runninghub', 'did'], default='runninghub',
+                        help='Video service to use (default: runninghub)')
+    parser.add_argument('--image-service', choices=['runninghub', 'gemini'], default='runninghub',
+                        help='Image generation service to use (default: runninghub)')
+    parser.add_argument('--base-path', default='data',
+                        help='Base path for data storage (default: data)')
+    parser.add_argument('--use-text-to-speech', action='store_true',
+                        help='Use text-to-speech instead of audio files (only for D-ID)')
+    parser.add_argument('--use-character-file', action='store_true',
+                        help='Use predefined character data from YAML files')
     
-    # Keep the script running
-    while True:
-        schedule.run_pending()
-        time.sleep(60)
+    args = parser.parse_args()
+    
+    # If using text-to-speech, set the environment variable
+    if args.use_text_to_speech and args.service == 'did':
+        os.environ['USE_DID_TEXT_TO_SPEECH'] = 'true'
+    
+    if args.run_now:
+        job(
+            base_path=args.base_path, 
+            service=args.service, 
+            use_character_file=args.use_character_file,
+            image_service=args.image_service
+        )
+    else:
+        # Schedule job to run at midnight HKT
+        hkt = pytz.timezone('Asia/Hong_Kong')
+        schedule.every().day.at("00:00").do(
+            job, 
+            base_path=args.base_path, 
+            service=args.service, 
+            use_character_file=args.use_character_file,
+            image_service=args.image_service
+        )
+        
+        print(f"Job scheduled to run daily at midnight HKT. Press Ctrl+C to exit.")
+        print(f"Using video service: {args.service}")
+        print(f"Using image service: {args.image_service}")
+        print(f"Base path: {args.base_path}")
+        print(f"Text-to-speech: {'Enabled' if args.use_text_to_speech and args.service == 'did' else 'Disabled'}")
+        print(f"Using character files: {args.use_character_file}")
+        
+        # Keep the script running
+        try:
+            while True:
+                schedule.run_pending()
+                time.sleep(60)
+        except KeyboardInterrupt:
+            print("Exiting...")
 
 if __name__ == "__main__":
     main() 

@@ -7,3 +7,7 @@ schedule==1.2.1
 aiosqlite==0.20.0
 pytz==2024.1
 elevenlabs==1.56.0
+streamlit==1.44.0
+pyyaml
+google-genai
+Pillow
