@@ -789,7 +789,7 @@ def save_story_results(story_dir, character_data, character_image_path, story_da
         print(f"Error saving story results: {str(e)}")
         return None, None
 
-def generate_adventure_story_with_images(base_path="./output", timestamp=None, db_path=None):
+def generate_adventure_story_with_images(base_path="./output", timestamp=None, db_path=None, character_file=None):
     """
     Generate an adventure story with images for a character.
 
@@ -797,24 +797,22 @@ def generate_adventure_story_with_images(base_path="./output", timestamp=None, d
         base_path (str): Path to save the adventure story files
         timestamp (str): Timestamp to use for file naming
         db_path (str): Path to the database file, if None will use default
+        character_file (str): Path to a specific character file to use (optional)
 
     Returns:
         tuple: (character_data, character_image_path, story_data, story_path, scene_images, audio_paths)
     """
     # Set up the timestamp for this run if not provided
     if not timestamp:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
 
     # Create directory structure
-    character_images_dir = f"{base_path}/character_images"
-    scene_images_dir = f"{base_path}/scene_images"
-    audio_dir = f"{base_path}/audio"
-    adventure_data_dir = f"{base_path}/adventure_data"
-
-    os.makedirs(character_images_dir, exist_ok=True)
-    os.makedirs(scene_images_dir, exist_ok=True)
-    os.makedirs(audio_dir, exist_ok=True)
-    os.makedirs(adventure_data_dir, exist_ok=True)
+    env_result = setup_story_environment(base_path, timestamp)
+    if not env_result:
+        logging.error("Failed to set up story environment")
+        return None
+    
+    story_dir, character_dir, scene_dir, voice_dir, date = env_result
 
     # Set up logging
     logging.basicConfig(
@@ -834,77 +832,65 @@ def generate_adventure_story_with_images(base_path="./output", timestamp=None, d
             return None
 
         logging.info("Preparing character data...")
-        character_data = prepare_character()
-        logging.info(f"Character data prepared: {character_data['name']}")
+        char_result = prepare_character(character_file)
+        if not char_result:
+            logging.error("Failed to prepare character data.")
+            return None
+            
+        # Unpack the tuple correctly
+        character_data, gender, voice, character_data_path = char_result
+        logging.info(f"Character data prepared: {character_data.get('name', 'Unknown')}")
 
-        character_image_path = f"{character_images_dir}/{timestamp}_{character_data['name'].replace(' ', '_').lower()}.png"
-        logging.info(f"Creating character image at: {character_image_path}")
-        
-        create_character_image(character_data, character_images_dir, timestamp)
-        if not os.path.exists(character_image_path):
-            logging.warning(f"Character image could not be created at {character_image_path}")
+        # Generate character image
+        logging.info(f"Creating character image...")
+        character_image_path = create_character_image(character_data, character_dir, timestamp)
+        if not character_image_path or not os.path.exists(character_image_path):
+            logging.warning(f"Character image could not be created")
+            return None
         else:
             logging.info(f"Character image created successfully at {character_image_path}")
 
+        # Generate adventure story
         logging.info("Generating adventure story...")
-        story_data = generate_adventure_story(client, character_data)
-        if not story_data:
+        story_data, story_path = create_adventure_story(character_data, story_dir, timestamp)
+        if not story_data or not story_path:
             logging.error("Failed to generate adventure story.")
             return None
 
-        # Save story to file
-        story_path = f"{adventure_data_dir}/{timestamp}_{character_data['name'].replace(' ', '_').lower()}_adventure.json"
-        with open(story_path, "w") as f:
-            json.dump(story_data, f, indent=4)
-        
         logging.info(f"Adventure story saved to {story_path}")
 
-        # Initialize scene images and audio paths lists
-        scene_images = []
-        audio_paths = []
+        # Get voice for audio generation
+        voice = get_random_voice()
 
+        # Generate scene images and audio
         logging.info("Generating scene images and audio...")
-        scene_image_paths, audio_file_paths = generate_scene_images_and_audio(
-            story_data, character_image_path, scene_images_dir, audio_dir, timestamp, character_data, base_path, character_data['date']
+        scene_images, audio_paths = generate_scene_images_and_audio(
+            story_data, character_image_path, scene_dir, voice_dir, timestamp, voice, base_path, date
         )
 
-        if not scene_image_paths or not audio_file_paths:
+        if not scene_images or not audio_paths:
             logging.error("Failed to generate scene images or audio.")
             return None
 
-        scene_images.extend(scene_image_paths)
-        audio_paths.extend(audio_file_paths)
-
-        # Initialize the database connection
+        # Save story results to database
         try:
-            if db_path:
-                logging.info(f"Using provided database path: {db_path}")
-                conn = setup_database(db_path)
-            else:
-                default_db_path = f"{base_path}/story.db"
-                logging.info(f"Using default database path: {default_db_path}")
-                conn = setup_database(default_db_path)
-                db_path = default_db_path
-            
-            logging.info(f"Database initialized at {db_path}")
-            
-            # Save story to database
-            logging.info("Saving story to database...")
-            save_story_to_db(
-                conn, 
-                story_data, 
+            logging.info(f"Saving story results to database: {db_path}")
+            result, story_id = save_story_results(
+                story_dir, 
                 character_data, 
                 character_image_path, 
+                story_data, 
+                story_path, 
                 scene_images, 
-                audio_paths
+                audio_paths, 
+                timestamp, 
+                date, 
+                db_path
             )
-            logging.info("Story saved to database successfully")
-            
-            # Verify the database file exists
-            if os.path.exists(db_path):
-                logging.info(f"Database file confirmed at {db_path} (Size: {os.path.getsize(db_path)} bytes)")
+            if not result:
+                logging.warning("Failed to save story results to database")
             else:
-                logging.warning(f"Database file not found at {db_path} after operations")
+                logging.info(f"Story saved to database with ID: {story_id}")
                 
         except Exception as db_error:
             logging.error(f"Database error: {str(db_error)}")
@@ -916,7 +902,17 @@ def generate_adventure_story_with_images(base_path="./output", timestamp=None, d
         logging.info(f"Scene images: {', '.join(scene_images)}")
         logging.info(f"Audio files: {', '.join(audio_paths)}")
 
-        return (character_data, character_image_path, story_data, story_path, scene_images, audio_paths)
+        # Return result data
+        return {
+            'character_data': character_data,
+            'character_image': character_image_path,
+            'story_data': story_data,
+            'story_path': story_path,
+            'scene_images': scene_images,
+            'audio_paths': audio_paths,
+            'timestamp': timestamp,
+            'date': date
+        }
 
     except Exception as e:
         logging.error(f"Error in generate_adventure_story_with_images: {str(e)}")
