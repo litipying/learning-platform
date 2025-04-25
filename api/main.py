@@ -38,12 +38,15 @@ os.makedirs(data_dir, exist_ok=True)
 # Mount the data directory for static file serving
 app.mount("/data", StaticFiles(directory=data_dir), name="data")
 
+# Get API base URL from environment or use default
+API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8003")
+
 # Function to convert file path to URL
 def get_file_url(file_path: Optional[str]) -> Optional[str]:
     if not file_path:
         return None
     # Replace the local path with the API endpoint path
-    return f"http://localhost:8003/data/{'/'.join(file_path.split('/')[1:])}"
+    return f"{API_BASE_URL}/data/{'/'.join(file_path.split('/')[1:])}"
 
 # Database models
 Base = declarative_base()
@@ -130,6 +133,8 @@ class SceneResponse(BaseModel):
     scene_story: Optional[str]
     image_path: Optional[str]
     audio_path: Optional[str]
+    image_url: Optional[str]
+    audio_url: Optional[str]
     
     class Config:
         from_attributes = True
@@ -354,16 +359,24 @@ async def get_scenes_by_date(date: str, latest_only: bool = False):
                 ) for story in stories
             ]
             
-            scene_responses = [
-                SceneResponse(
-                    id=scene.id,
-                    scene_number=scene.scene_number,
-                    description=scene.description,
-                    scene_story=scene.scene_story,
-                    image_path=get_file_url(scene.image_path),
-                    audio_path=get_file_url(scene.audio_path)
-                ) for scene in scenes
-            ]
+            scene_responses = []
+            for scene in scenes:
+                # Get the file URLs
+                image_url = get_file_url(scene.image_path)
+                audio_url = get_file_url(scene.audio_path)
+                
+                scene_responses.append(
+                    SceneResponse(
+                        id=scene.id,
+                        scene_number=scene.scene_number,
+                        description=scene.description,
+                        scene_story=scene.scene_story,
+                        image_path=scene.image_path,
+                        audio_path=scene.audio_path,
+                        image_url=image_url,
+                        audio_url=audio_url
+                    )
+                )
             
             return StoryDateResponse(
                 date=date,

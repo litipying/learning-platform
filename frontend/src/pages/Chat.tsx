@@ -18,6 +18,9 @@ const highlightStyles = `
 const ELEVENLABS_API_KEY = import.meta.env.VITE_ELEVENLABS_API_KEY || '';
 const GEMINI_API_KEY = import.meta.env.VITE_GEMINI_API_KEY || '';
 
+// API URL from environment variable with fallback
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8003';
+
 interface Message {
   id: number;
   text: string;
@@ -53,9 +56,6 @@ interface StoryData {
   stories: StoryCharacter[];
   scenes: Scene[];
 }
-
-// API URL
-const API_URL = 'http://localhost:8003';
 
 const Chat: React.FC = () => {
   const [messages, setMessages] = useState<Message[]>([]);
@@ -686,18 +686,8 @@ INSTRUCTIONS:
     if (audioRef.current && sceneData.audio_url) {
       console.log(`Playing audio for scene ${sceneData.scene_number}:`, sceneData.audio_url);
       
-      // Ensure we have a valid audio URL
-      let audioUrl = sceneData.audio_url;
-      
-      // If the URL is relative, make it absolute with the API_URL
-      if (!audioUrl.startsWith('http')) {
-        audioUrl = `${API_URL}${audioUrl}`;
-      }
-      
-      console.log("Final audio URL:", audioUrl);
-      
       // Set the source and load the audio
-      audioRef.current.src = audioUrl;
+      audioRef.current.src = sceneData.audio_url;
       audioRef.current.load(); // Explicitly load before playing
       
       // Add a small delay to ensure audio element is ready
@@ -802,9 +792,7 @@ INSTRUCTIONS:
         {currentSceneData?.image_url ? (
           <div className="mb-4 flex-1 relative rounded-2xl overflow-hidden border-2 border-white/30 shadow-lg">
             <img 
-              src={currentSceneData.image_url.startsWith('http') ? 
-                currentSceneData.image_url :
-                `${API_URL}${currentSceneData.image_url}`} 
+              src={currentSceneData.image_url}
               alt={`Scene ${currentScene}`}
               className="w-full h-full object-cover" 
             />
