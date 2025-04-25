@@ -554,7 +554,7 @@ Include subtle elements that suggest their alien origin such as unusual skin tex
                 
                 progress_bar.progress(100)
                 st.success("🎉 Adventure story generation completed!")
-                st.info(f"Content saved to: {story_base_path}/story/{date}")
+                st.info(f"Content saved to: {story_base_path}/{date}")
                 
         except Exception as e:
             st.error(f"❌ Error during story generation: {str(e)}")
