@@ -14,7 +14,7 @@ services:
       - NODE_ENV=development
     depends_on:
       - api
-      
+
   api:
     build:
       context: ./api
@@ -34,6 +34,8 @@ services:
     volumes:
       - ./cron:/app
       - ./data:/app/data
+    ports:
+      - "8503:8501"
     environment:
       - PYTHONUNBUFFERED=1
       - NEWS_API_KEY=${NEWS_API_KEY}
